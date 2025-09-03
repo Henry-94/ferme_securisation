@@ -1,6 +1,6 @@
 const express = require('express');
 const http = require('http');
-const WebSocket = require('ws'); // Utilisation du protocole WebSocket
+const WebSocket = require('ws');
 
 const app = express();
 const server = http.createServer(app);
