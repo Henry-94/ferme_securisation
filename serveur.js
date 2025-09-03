@@ -1,36 +1,14 @@
 const express = require('express');
-const multer = require('multer');
 const http = require('http');
 const WebSocket = require('ws'); // Utilisation du protocole WebSocket
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server }); // Crée un serveur WebSocket attaché au serveur HTTP
+const wss = new WebSocket.Server({ server });
 const port = process.env.PORT || 3000;
 
-// Création du dossier pour les images si ce n'est pas déjà fait
-const uploadsDir = path.join(__dirname, 'Uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
-}
-
-// Configuration de multer pour la gestion des uploads d'images
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `capture_${Date.now()}.jpg`);
-  }
-});
-const upload = multer({ storage: storage });
-
-// Fichier pour stocker la configuration de l'appareil
-const configFilePath = path.join(__dirname, 'config.json');
-
-// Configuration par défaut
+// La configuration est stockée en mémoire.
+// Elle sera réinitialisée à chaque redémarrage du serveur.
 let config = {
   ssid: 'DEFAULT_SSID',
   password: 'DEFAULT_PASS',
@@ -39,44 +17,76 @@ let config = {
   endHour: 6
 };
 
-// Charger la configuration depuis le fichier au démarrage
-if (fs.existsSync(configFilePath)) {
-  try {
-    config = JSON.parse(fs.readFileSync(configFilePath, 'utf8'));
-    console.log('✅ Configuration chargée :', config);
-  } catch (err) {
-    console.error('❌ Erreur lors du chargement de la configuration :', err);
-  }
-} else {
-  // Créer un fichier de configuration par défaut s'il n'existe pas
-  fs.writeFileSync(configFilePath, JSON.stringify(config, null, 2));
-  console.log('✅ Configuration par défaut créée :', config);
-}
+// File d'attente pour les images en attente de diffusion
+let pendingImages = [];
+const MAX_PENDING_IMAGES = 10; // Limite pour éviter la surcharge de la mémoire
 
-// Middleware pour parser les requêtes JSON
+// Middleware pour les requêtes JSON
 app.use(express.json());
 
-// Servir les images statiquement (afin que les clients puissent les télécharger)
-app.use('/Uploads', express.static(uploadsDir));
+// Middleware pour les requêtes d'images brutes.
+app.use(express.raw({
+  type: 'image/jpeg',
+  limit: '10mb'
+}));
+
+// Fonction pour envoyer des messages à tous les clients Android
+function broadcastToAndroidClients(message) {
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      // Envoyer le message à tous les clients
+      client.send(JSON.stringify(message));
+    }
+  });
+}
+
+// Fonction pour envoyer une seule image depuis la file d'attente
+function processImageQueue() {
+  if (pendingImages.length > 0) {
+    // Vérifier s'il y a des clients connectés
+    const hasConnectedClients = Array.from(wss.clients).some(client => client.readyState === WebSocket.OPEN);
+
+    if (hasConnectedClients) {
+      const imageToSend = pendingImages.shift(); // Prend la première image de la file
+      broadcastToAndroidClients({
+        type: 'image',
+        data: imageToSend.data,
+        timestamp: imageToSend.timestamp
+      });
+      console.log(`✅ Image envoyée depuis la file d'attente. ${pendingImages.length} images restantes.`);
+    }
+  }
+}
+
+// Vérifier la file d'attente toutes les 5 secondes
+setInterval(processImageQueue, 5000); // Exécute la fonction toutes les 5 secondes
 
 // --- Endpoints pour l'ESP32-CAM ---
 
 // Endpoint pour recevoir les images
-app.post('/upload', upload.single('image'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).send('Aucune image reçue');
+app.post('/upload', (req, res) => {
+  if (!req.body || req.body.length === 0) {
+    return res.status(400).send('Aucune image reçue.');
   }
-  const filePath = `/Uploads/${req.file.filename}`;
-  console.log('📸 Image reçue et enregistrée :', filePath);
 
-  // Notifier tous les clients Android connectés via WebSocket
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({ type: 'image', url: filePath, timestamp: Date.now() }));
-    }
-  });
+  const imageBuffer = req.body;
+  const base64Image = imageBuffer.toString('base64');
 
-  res.status(200).send('Image reçue et stockée avec succès');
+  // Ajouter l'image à la file d'attente
+  if (pendingImages.length < MAX_PENDING_IMAGES) {
+    pendingImages.push({
+      data: base64Image,
+      timestamp: Date.now()
+    });
+    console.log(`📸 Image reçue et ajoutée à la file d'attente. ${pendingImages.length} images en attente.`);
+  } else {
+    console.log("⚠️ File d'attente pleine. L'image a été ignorée.");
+  }
+
+  // Tenter d'envoyer l'image immédiatement si des clients sont connectés
+  processImageQueue();
+
+  res.status(200).send('Image reçue et traitée.');
 });
 
 // Endpoint pour envoyer la configuration à l'ESP32-CAM
@@ -91,33 +101,32 @@ app.get('/get-config', (req, res) => {
 app.post('/set-config', (req, res) => {
   const { ssid, password, phoneNumber, startHour, endHour } = req.body;
 
-  // Mise à jour de la configuration avec les champs fournis
+  // Mise à jour de la configuration en mémoire
   if (ssid !== undefined) config.ssid = ssid;
   if (password !== undefined) config.password = password;
   if (phoneNumber !== undefined) config.phoneNumber = phoneNumber;
   if (startHour !== undefined) config.startHour = startHour;
   if (endHour !== undefined) config.endHour = endHour;
 
-  // Enregistrer la configuration mise à jour dans le fichier
-  try {
-    fs.writeFileSync(configFilePath, JSON.stringify(config, null, 2));
-    console.log('✅ Configuration mise à jour par l\'application Android :', config);
-    res.status(200).send('Configuration mise à jour avec succès');
-  } catch (err) {
-    console.error('❌ Erreur lors de l\'enregistrement de la configuration :', err);
-    res.status(500).send('Erreur serveur lors de l\'enregistrement');
-  }
+  console.log('✅ Configuration mise à jour par l\'application Android :', config);
+  res.status(200).send('Configuration mise à jour avec succès.');
 });
 
 // Gestion des connexions WebSocket
 wss.on('connection', (ws) => {
   console.log('🔗 Client WebSocket connecté');
+  
+  // Tenter d'envoyer les images en attente immédiatement
+  processImageQueue();
+
   ws.on('message', (message) => {
     console.log('Message reçu du client :', message.toString());
-    // Ici, vous pouvez gérer les messages d'identification ou d'autres commandes
   });
   ws.on('close', () => {
     console.log('❌ Client WebSocket déconnecté');
+  });
+  ws.on('error', (error) => {
+    console.error('❌ Erreur WebSocket:', error.message);
   });
 });
 
