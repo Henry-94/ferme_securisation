@@ -131,6 +131,7 @@ wss.on('connection', (ws) => {
 });
 
 // Lancer le serveur
-server.listen(port, () => {
-  console.log(`🚀 Serveur en écoute sur le port ${port}`);
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+    console.log(`🚀 Serveur WebSocket démarré sur le port ${PORT}`);
 });
