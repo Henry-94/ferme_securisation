@@ -1,137 +1,164 @@
 const express = require('express');
-const http = require('http');
 const WebSocket = require('ws');
+const http = require('http');
+const { v4: uuidv4 } = require('uuid');
 
+// Initialize Express app and HTTP server
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-const port = process.env.PORT || 3000;
 
-// La configuration est stockée en mémoire.
-// Elle sera réinitialisée à chaque redémarrage du serveur.
-let config = {
-  ssid: 'DEFAULT_SSID',
-  password: 'DEFAULT_PASS',
-  phoneNumber: '+261000000000',
-  startHour: 18,
-  endHour: 6
+// Store connected clients
+const clients = {
+  esp32std: null,
+  esp32cam: null,
+  android: []
 };
 
-// File d'attente pour les images en attente de diffusion
-let pendingImages = [];
-const MAX_PENDING_IMAGES = 10; // Limite pour éviter la surcharge de la mémoire
+// Store pending commands for HTTP fallback
+const commands = {
+  esp32std: [],
+};
 
-// Middleware pour les requêtes JSON
+// Middleware for JSON parsing
 app.use(express.json());
 
-// Middleware pour les requêtes d'images brutes.
-app.use(express.raw({
-  type: 'image/jpeg',
-  limit: '10mb'
-}));
-
-// Fonction pour envoyer des messages à tous les clients Android
-function broadcastToAndroidClients(message) {
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      // Envoyer le message à tous les clients
-      client.send(JSON.stringify(message));
-    }
-  });
-}
-
-// Fonction pour envoyer une seule image depuis la file d'attente
-function processImageQueue() {
-  if (pendingImages.length > 0) {
-    // Vérifier s'il y a des clients connectés
-    const hasConnectedClients = Array.from(wss.clients).some(client => client.readyState === WebSocket.OPEN);
-
-    if (hasConnectedClients) {
-      const imageToSend = pendingImages.shift(); // Prend la première image de la file
-      broadcastToAndroidClients({
-        type: 'image',
-        data: imageToSend.data,
-        timestamp: imageToSend.timestamp
-      });
-      console.log(`✅ Image envoyée depuis la file d'attente. ${pendingImages.length} images restantes.`);
-    }
-  }
-}
-
-// Vérifier la file d'attente toutes les 5 secondes
-setInterval(processImageQueue, 5000); // Exécute la fonction toutes les 5 secondes
-
-// --- Endpoints pour l'ESP32-CAM ---
-
-// Endpoint pour recevoir les images
-app.post('/upload', (req, res) => {
-  if (!req.body || req.body.length === 0) {
-    return res.status(400).send('Aucune image reçue.');
-  }
-
-  const imageBuffer = req.body;
-  const base64Image = imageBuffer.toString('base64');
-
-  // Ajouter l'image à la file d'attente
-  if (pendingImages.length < MAX_PENDING_IMAGES) {
-    pendingImages.push({
-      data: base64Image,
-      timestamp: Date.now()
-    });
-    console.log(`📸 Image reçue et ajoutée à la file d'attente. ${pendingImages.length} images en attente.`);
+// HTTP endpoint for ESP32-Standard command polling
+app.get('/device/esp32std/commands', (req, res) => {
+  if (commands.esp32std.length > 0) {
+    const command = commands.esp32std.shift();
+    res.json(command);
   } else {
-    console.log("⚠️ File d'attente pleine. L'image a été ignorée.");
+    res.json({});
   }
-
-  // Tenter d'envoyer l'image immédiatement si des clients sont connectés
-  processImageQueue();
-
-  res.status(200).send('Image reçue et traitée.');
 });
 
-// Endpoint pour envoyer la configuration à l'ESP32-CAM
-app.get('/get-config', (req, res) => {
-  res.json(config);
-  console.log('⚙️ Configuration demandée par ESP32, envoyée.');
-});
-
-// --- Endpoint pour l'application Android ---
-
-// Endpoint pour recevoir les configurations
-app.post('/set-config', (req, res) => {
-  const { ssid, password, phoneNumber, startHour, endHour } = req.body;
-
-  // Mise à jour de la configuration en mémoire
-  if (ssid !== undefined) config.ssid = ssid;
-  if (password !== undefined) config.password = password;
-  if (phoneNumber !== undefined) config.phoneNumber = phoneNumber;
-  if (startHour !== undefined) config.startHour = startHour;
-  if (endHour !== undefined) config.endHour = endHour;
-
-  console.log('✅ Configuration mise à jour par l\'application Android :', config);
-  res.status(200).send('Configuration mise à jour avec succès.');
-});
-
-// Gestion des connexions WebSocket
+// WebSocket connection handling
 wss.on('connection', (ws) => {
-  console.log('🔗 Client WebSocket connecté');
-  
-  // Tenter d'envoyer les images en attente immédiatement
-  processImageQueue();
+  let clientId = null;
+  let clientType = null;
 
   ws.on('message', (message) => {
-    console.log('Message reçu du client :', message.toString());
+    try {
+      // Handle binary messages (from ESP32-CAM)
+      if (Buffer.isBuffer(message)) {
+        if (clientType === 'esp32cam' && clients.android.length > 0) {
+          // Convert binary to base64 and forward to Android clients
+          const base64Image = message.toString('base64');
+          const imageMessage = {
+            type: 'image',
+            data: base64Image
+          };
+          clients.android.forEach(androidWs => {
+            if (androidWs.isAlive) {
+              androidWs.send(JSON.stringify(imageMessage));
+            }
+          });
+        }
+        return;
+      }
+
+      // Parse JSON message
+      const data = JSON.parse(message);
+
+      // Handle registration
+      if (data.type === 'register' && data.device) {
+        clientId = uuidv4();
+        clientType = data.device;
+        ws.clientId = clientId;
+        ws.isAlive = true;
+
+        if (clientType === 'esp32std') {
+          clients.esp32std = ws;
+          console.log('ESP32-Standard registered');
+        } else if (clientType === 'esp32cam') {
+          clients.esp32cam = ws;
+          console.log('ESP32-CAM registered');
+        } else if (clientType === 'android') {
+          clients.android.push(ws);
+          console.log(`Android client registered (${clients.android.length} total)`);
+        }
+      }
+
+      // Handle alerts and state messages
+      if (data.type === 'alert' || data.type === 'state') {
+        // Forward to all Android clients
+        clients.android.forEach(androidWs => {
+          if (androidWs.isAlive) {
+            androidWs.send(JSON.stringify({
+              type: 'alert',
+              message: JSON.stringify(data)
+            }));
+          }
+        });
+      }
+
+      // Handle binary_start (image header from ESP32-CAM)
+      if (data.type === 'binary_start' && clientType === 'esp32cam') {
+        console.log(`Image header received: ${data.filename}`);
+      }
+
+      // Handle commands from Android
+      if (data.type === 'command' && clientType === 'android') {
+        const target = data.target; // 'esp32std' or 'esp32cam'
+        const command = {
+          type: 'command',
+          command: data.command,
+          ...data.params // e.g., { ssid, pass, mode, time, rfid_list }
+        };
+
+        if (target === 'esp32std' && clients.esp32std && clients.esp32std.isAlive) {
+          clients.esp32std.send(JSON.stringify(command));
+        } else if (target === 'esp32cam' && clients.esp32cam && clients.esp32cam.isAlive) {
+          clients.esp32cam.send(JSON.stringify(command));
+        } else {
+          // Store for HTTP fallback (ESP32-Standard only)
+          if (target === 'esp32std') {
+            commands.esp32std.push(command);
+          }
+          ws.send(JSON.stringify({ type: 'error', message: `Target ${target} not connected` }));
+        }
+      }
+    } catch (error) {
+      console.error('Error processing message:', error);
+      ws.send(JSON.stringify({ type: 'error', message: error.message }));
+    }
   });
+
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+
   ws.on('close', () => {
-    console.log('❌ Client WebSocket déconnecté');
-  });
-  ws.on('error', (error) => {
-    console.error('❌ Erreur WebSocket:', error.message);
+    if (clientType === 'esp32std') {
+      clients.esp32std = null;
+      console.log('ESP32-Standard disconnected');
+    } else if (clientType === 'esp32cam') {
+      clients.esp32cam = null;
+      console.log('ESP32-CAM disconnected');
+    } else if (clientType === 'android') {
+      clients.android = clients.android.filter(c => c.clientId !== clientId);
+      console.log(`Android client disconnected (${clients.android.length} total)`);
+    }
   });
 });
 
-// Lancer le serveur
-const PORT = process.env.PORT || 8080;
+// Ping clients to check if they are alive
+setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (!ws.isAlive) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+// Basic HTTP route
+app.get('/', (req, res) => {
+  res.send('Farm Security Node.js Server');
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`🚀 Serveur WebSocket démarré sur le port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
