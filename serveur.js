@@ -1,3 +1,4 @@
+// Serveur Node.js corrigé avec ajout de ping/pong
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -24,9 +25,23 @@ wss.on('connection', (ws) => {
 
   console.log('🔗 Nouveau client WS en attente d\'identification...');
 
+  // Ping périodique pour garder la connexion active
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ping' }));
+    } else {
+      clearInterval(pingInterval);
+    }
+  }, 30000); // Ping toutes les 30s
+
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
+
+      if (data.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }));
+        return;
+      }
 
       if (data.type === 'register') {
         clientType = data.device;
@@ -83,6 +98,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    clearInterval(pingInterval);
     if (clientType === 'esp32std') esp32Std = null;
     if (clientType === 'esp32cam') esp32Cam = null;
     if (clientType === 'android') androidClients.delete(clientId);
