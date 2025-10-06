@@ -121,6 +121,40 @@ wss.on('connection', (ws) => {
   });
 });
 
+// --- HTTP endpoint pour recevoir les commandes ---
+app.post('/command', (req, res) => {
+  try {
+    const data = req.body;
+    if (!data.type || !data.target || !data.command) {
+      return res.status(400).json({ type: 'error', message: 'Format de commande invalide' });
+    }
+
+    const cmdObj = { type: 'command', command: data.command };
+    if (data.target === 'esp32std' && esp32Std?.readyState === WebSocket.OPEN) {
+      esp32Std.send(JSON.stringify(cmdObj));
+      androidClients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ type: 'command_response', success: true, message: 'Commande envoyée à ESP32-STD' }));
+        }
+      });
+      res.json({ type: 'command_response', success: true, message: 'Commande envoyée à ESP32-STD' });
+    } else if (data.target === 'esp32std') {
+      commandsQueue.push(cmdObj);
+      androidClients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ type: 'command_response', success: false, message: 'ESP32-STD non connecté, commande mise en file d\'attente' }));
+        }
+      });
+      res.json({ type: 'command_response', success: false, message: 'ESP32-STD non connecté, commande mise en file d\'attente' });
+    } else {
+      res.status(400).json({ type: 'error', message: `Target ${data.target} non supporté` });
+    }
+  } catch (err) {
+    console.error('Erreur HTTP /command:', err.message);
+    res.status(500).json({ type: 'error', message: err.message });
+  }
+});
+
 // --- HTTP fallback pour ESP32-STD ---
 app.get('/device/esp32std/commands', (req, res) => {
   if (commandsQueue.length > 0) {
