@@ -1,4 +1,3 @@
-// Serveur Node.js corrigé avec ajout de ping/pong
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -47,12 +46,14 @@ wss.on('connection', (ws) => {
         clientType = data.device;
         if (clientType === 'esp32std') {
           esp32Std = ws;
+          console.log('✅ ESP32-STD connecté');
         } else if (clientType === 'esp32cam') {
           esp32Cam = ws;
+          console.log('✅ ESP32-CAM connecté');
         } else if (clientType === 'android') {
           androidClients.set(clientId, ws);
+          console.log('✅ Android connecté');
         }
-        console.log(`✅ ${clientType} connecté`);
         return;
       }
 
@@ -63,13 +64,27 @@ wss.on('connection', (ws) => {
 
         if (target === 'esp32std' && esp32Std?.readyState === WebSocket.OPEN) {
           esp32Std.send(JSON.stringify(cmdObj));
+          ws.send(JSON.stringify({ type: 'command_response', success: true, message: 'Commande envoyée à ESP32-STD' }));
         } else if (target === 'esp32cam' && esp32Cam?.readyState === WebSocket.OPEN) {
           esp32Cam.send(JSON.stringify(cmdObj));
+          ws.send(JSON.stringify({ type: 'command_response', success: true, message: 'Commande envoyée à ESP32-CAM' }));
         } else if (target === 'esp32std') {
-          // fallback HTTP
           commandsQueue.push(cmdObj);
+          ws.send(JSON.stringify({ type: 'command_response', success: false, message: 'ESP32-STD non connecté, commande mise en file d\'attente' }));
         } else {
           ws.send(JSON.stringify({ type: 'error', message: `Target ${target} not connected` }));
+        }
+      }
+
+      // Commande de configuration directe (pour compatibilité)
+      if (data.type === 'config' && clientType === 'android') {
+        const cmdObj = { type: 'command', command: data };
+        if (esp32Std?.readyState === WebSocket.OPEN) {
+          esp32Std.send(JSON.stringify(cmdObj));
+          ws.send(JSON.stringify({ type: 'command_response', success: true, message: 'Configuration envoyée à ESP32-STD' }));
+        } else {
+          commandsQueue.push(cmdObj);
+          ws.send(JSON.stringify({ type: 'command_response', success: false, message: 'ESP32-STD non connecté, configuration mise en file d\'attente' }));
         }
       }
 
