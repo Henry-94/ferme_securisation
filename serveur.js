@@ -9,12 +9,18 @@ const wss = new WebSocket.Server({ server });
 
 app.use(express.json({ limit: '10mb' }));
 
+// Middleware to log all HTTP requests
+app.use((req, res, next) => {
+  console.log(`📥 HTTP ${req.method} ${req.url} received with body:`, JSON.stringify(req.body));
+  next();
+});
+
 // Clients connectés
 let esp32Std = null;
 let esp32Cam = null;
 const androidClients = new Map();
 
-// Commandes en file pour ESP32-STD (HTTP polling fallback)
+// Commandes en file pour ESP32-STD et ESP32-CAM
 const commandsQueue = [];
 
 // --- WebSocket Management ---
@@ -22,7 +28,7 @@ wss.on('connection', (ws) => {
   const clientId = uuidv4();
   let clientType = null;
 
-  console.log('🔗 Nouveau client WS en attente d\'identification...');
+  console.log(`🔗 Nouveau client WS en attente d'identification (ID: ${clientId})...`);
 
   // Ping périodique pour garder la connexion active
   const pingInterval = setInterval(() => {
@@ -35,6 +41,7 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (message) => {
     try {
+      console.log(`📡 WS message received from ${clientType || 'unknown'}:`, message.toString());
       const data = JSON.parse(message);
 
       if (data.type === 'ping') {
@@ -62,9 +69,11 @@ wss.on('connection', (ws) => {
         const target = data.target;
         const cmdObj = {
           type: 'command',
-          command: data.command.command || data.command, // Handle nested or direct command
-          ...data.command // Spread params like ssid, password, etc.
+          command: data.command.command || data.command,
+          ...data.command
         };
+
+        console.log(`📤 Commande reçue pour ${target}:`, JSON.stringify(cmdObj));
 
         if (target === 'esp32std' && esp32Std?.readyState === WebSocket.OPEN) {
           esp32Std.send(JSON.stringify(cmdObj));
@@ -121,7 +130,7 @@ wss.on('connection', (ws) => {
     if (clientType === 'esp32std') esp32Std = null;
     if (clientType === 'esp32cam') esp32Cam = null;
     if (clientType === 'android') androidClients.delete(clientId);
-    console.log(`❌ ${clientType || 'client inconnu'} déconnecté`);
+    console.log(`❌ ${clientType || 'client inconnu'} déconnecté (ID: ${clientId})`);
   });
 });
 
@@ -129,13 +138,15 @@ wss.on('connection', (ws) => {
 app.post('/command', (req, res) => {
   try {
     const data = req.body;
+    console.log('📥 /command endpoint called with:', JSON.stringify(data));
     if (!data.type || !data.target || !data.command) {
+      console.log('❌ Invalid command format');
       return res.status(400).json({ type: 'error', message: 'Format de commande invalide' });
     }
 
     const cmdObj = {
       type: 'command',
-      command: data.command.command || data.command, // Handle both nested and direct command
+      command: data.command.command || data.command,
       ...data.command
     };
 
@@ -164,6 +175,7 @@ app.post('/command', (req, res) => {
       });
       res.json({ type: 'command_response', success: false, message: `${data.target} non connecté, commande mise en file d'attente` });
     } else {
+      console.log(`❌ Target ${data.target} non supporté`);
       res.status(400).json({ type: 'error', message: `Target ${data.target} non supporté` });
     }
   } catch (err) {
@@ -172,8 +184,17 @@ app.post('/command', (req, res) => {
   }
 });
 
-// --- HTTP fallback pour ESP32-STD ---
+// --- HTTP fallback pour ESP32-STD et ESP32-CAM ---
 app.get('/device/esp32std/commands', (req, res) => {
+  if (commandsQueue.length > 0) {
+    const cmd = commandsQueue.shift();
+    res.json(cmd);
+  } else {
+    res.json({});
+  }
+});
+
+app.get('/device/esp32cam/commands', (req, res) => {
   if (commandsQueue.length > 0) {
     const cmd = commandsQueue.shift();
     res.json(cmd);
