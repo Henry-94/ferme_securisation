@@ -62,7 +62,7 @@ wss.on('connection', (ws) => {
         const target = data.target;
         const cmdObj = {
           type: 'command',
-          command: data.command.command, // Extract nested command
+          command: data.command.command || data.command, // Handle nested or direct command
           ...data.command // Spread params like ssid, password, etc.
         };
 
@@ -80,11 +80,11 @@ wss.on('connection', (ws) => {
               client.send(JSON.stringify({ type: 'command_response', success: true, message: 'Commande envoyée à ESP32-CAM' }));
             }
           });
-        } else if (target === 'esp32std') {
+        } else if (target === 'esp32std' || target === 'esp32cam') {
           commandsQueue.push(cmdObj);
           androidClients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({ type: 'command_response', success: false, message: 'ESP32-STD non connecté, commande mise en file d\'attente' }));
+              client.send(JSON.stringify({ type: 'command_response', success: false, message: `${target} non connecté, commande mise en file d'attente` }));
             }
           });
         } else {
@@ -147,14 +147,22 @@ app.post('/command', (req, res) => {
         }
       });
       res.json({ type: 'command_response', success: true, message: 'Commande envoyée à ESP32-STD' });
-    } else if (data.target === 'esp32std') {
+    } else if (data.target === 'esp32cam' && esp32Cam?.readyState === WebSocket.OPEN) {
+      esp32Cam.send(JSON.stringify(cmdObj));
+      androidClients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ type: 'command_response', success: true, message: 'Commande envoyée à ESP32-CAM' }));
+        }
+      });
+      res.json({ type: 'command_response', success: true, message: 'Commande envoyée à ESP32-CAM' });
+    } else if (data.target === 'esp32std' || data.target === 'esp32cam') {
       commandsQueue.push(cmdObj);
       androidClients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ type: 'command_response', success: false, message: 'ESP32-STD non connecté, commande mise en file d\'attente' }));
+          client.send(JSON.stringify({ type: 'command_response', success: false, message: `${data.target} non connecté, commande mise en file d'attente` }));
         }
       });
-      res.json({ type: 'command_response', success: false, message: 'ESP32-STD non connecté, commande mise en file d\'attente' });
+      res.json({ type: 'command_response', success: false, message: `${data.target} non connecté, commande mise en file d'attente` });
     } else {
       res.status(400).json({ type: 'error', message: `Target ${data.target} non supporté` });
     }
