@@ -9,7 +9,7 @@ const wss = new WebSocket.Server({ server });
 
 app.use(express.json({ limit: '10mb' }));
 
-// Middleware to log all HTTP requests
+
 app.use((req, res, next) => {
   console.log(`📥 HTTP ${req.method} ${req.url} received with body:`, JSON.stringify(req.body));
   next();
