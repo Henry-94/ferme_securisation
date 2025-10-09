@@ -9,7 +9,6 @@ const wss = new WebSocket.Server({ server });
 
 app.use(express.json({ limit: '10mb' }));
 
-
 app.use((req, res, next) => {
   console.log(`📥 HTTP ${req.method} ${req.url} received with body:`, JSON.stringify(req.body));
   next();
@@ -44,8 +43,8 @@ wss.on('connection', (ws) => {
       console.log(`📡 WS message received from ${clientType || 'unknown'}:`, message.toString());
       const data = JSON.parse(message);
 
-      if (data.type === 'ping') {
-        ws.send(JSON.stringify({ type: 'pong' }));
+      if (data.type === 'pong') {
+        console.log('Pong reçu de ' + clientType);
         return;
       }
 
@@ -61,6 +60,7 @@ wss.on('connection', (ws) => {
           androidClients.set(clientId, ws);
           console.log('✅ Android connecté');
         }
+        ws.send(JSON.stringify({ type: 'registered', message: 'Enregistrement réussi' }));
         return;
       }
 
